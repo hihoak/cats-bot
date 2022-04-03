@@ -12,6 +12,38 @@ import time
 import telegram
 import telegram.ext
 
+HOME_DIR = os.getenv("HOME")
+DATE = datetime.datetime.now()
+TIMES_TO_TRY_GET_REQUEST = 5
+CAT_API_TOKEN = os.getenv("CAT_API_TOKEN", "")
+PROGRAM_FILES_DIRECTORY = f"{HOME_DIR}/workspace/cats-cron/"
+PICTURES_FILES_DIRECTORY = f"{PROGRAM_FILES_DIRECTORY}/pictures/"
+TODAY_PICTURES_DIRECTORY = f"{PICTURES_FILES_DIRECTORY}/{DATE.year}-{DATE.month}-{DATE.day}"
+LOGS_FILE = f"{PROGRAM_FILES_DIRECTORY}/logs/morning_cats.logs"
+SEARCH_HANDLE = "images/search"
+CAT_FILENAME_REGEX = re.compile(r".*/(.*)")
+
+# logger
+def init_logger() -> loguru.logger:
+    logger = loguru.logger
+    logger.add(sink=LOGS_FILE)
+    return logger
+
+
+logger = init_logger()
+
+# complimentr
+DEFAULT_COMPLIMENT = "you are charming"
+def get_compliment():
+    logger.info("Start getting compliment of a day")
+    compliment_of_a_day = DEFAULT_COMPLIMENT
+    try:
+        compliment_of_a_day = requests.get("https://complimentr.com/api").json().get("compliment", DEFAULT_COMPLIMENT) + " 👉👈"
+    except Exception as ex:
+        logger.error(f"Can't get compliment. Error: {ex}")
+    logger.info(f"Today compliment is {compliment_of_a_day}")
+    return compliment_of_a_day
+
 # telegram
 TELEGRAM_SUBSCRIBED_CHATS = set()
 TELEGRAM_BOT_KEY = os.getenv("TELEGRAM_BOT_KEY", "")
@@ -32,15 +64,16 @@ def init_telegram() -> telegram.Bot:
     dispatcher.add_handler(telegram.ext.CommandHandler('subscribe', subscribe))
     dispatcher.add_handler(telegram.ext.CommandHandler('unsubscribe', unsubscribe))
     updater.start_polling()
+    logger.info("Successfully started!")
     return updater.bot
 
 
 def send_cats_to_subscribers(bot: telegram.Bot, cats_file_paths: list):
     logger.info(f"Sending cats to subscribers: {TELEGRAM_SUBSCRIBED_CHATS}")
     cats_to_send = []
-    for cat_file_path in cats_file_paths:
+    for idx, cat_file_path in enumerate(cats_file_paths):
         with open(cat_file_path, "rb") as picture:
-            cats_to_send.append(InputMediaPhoto(picture))
+            cats_to_send.append(InputMediaPhoto(picture, caption=get_compliment() if idx == 0 else ""))
 
     failed_subscribers = set()
     for chat_id in TELEGRAM_SUBSCRIBED_CHATS:
@@ -53,27 +86,6 @@ def send_cats_to_subscribers(bot: telegram.Bot, cats_file_paths: list):
     if failed_subscribers:
         logger.error(f"Failed to send pictures to {failed_subscribers}")
 # end
-
-HOME_DIR = os.getenv("HOME")
-DATE = datetime.datetime.now()
-TIMES_TO_TRY_GET_REQUEST = 5
-CAT_API_TOKEN = os.getend("CAT_API_TOKEN", "")
-PROGRAM_FILES_DIRECTORY = f"{HOME_DIR}/workspace/cats-cron/"
-PICTURES_FILES_DIRECTORY = f"{PROGRAM_FILES_DIRECTORY}/pictures/"
-TODAY_PICTURES_DIRECTORY = f"{PICTURES_FILES_DIRECTORY}/{DATE.year}-{DATE.month}-{DATE.day}"
-LOGS_FILE = f"{PROGRAM_FILES_DIRECTORY}/logs/morning_cats.logs"
-SEARCH_HANDLE = "images/search"
-CAT_FILENAME_REGEX = re.compile(r".*/(.*)")
-
-
-def init_logger() -> loguru.logger:
-    logger = loguru.logger
-    logger.add(sink=LOGS_FILE)
-    return logger
-
-
-logger = init_logger()
-
 
 def create_pictures_directory():
     try:
@@ -154,7 +166,7 @@ def main_task(bot: telegram.Bot):
 
 if __name__ == "__main__":
     bot = init_telegram()
-    job = schedule.every().day.at("08:00").do(main_task, bot=bot)
+    job = schedule.every().day.at("20:15").do(main_task, bot=bot)
     while True:
         schedule.run_pending()
         time.sleep(1)
