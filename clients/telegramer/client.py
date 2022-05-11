@@ -8,6 +8,7 @@ from telegram import InputMediaPhoto, ext
 from telegram.ext.filters import Filters
 
 from clients.cats.client import CatsClient
+from clients.telegramer import tg_utils
 import utils
 
 # telegram
@@ -32,12 +33,16 @@ DEFAULT_HELP_MESSAGE = f"""
  - /unsubscribe - отписка от всех рассылок
  - /new каждый 2 дня в 09:00 - пример создания новой рассылки
  - /list - показывает все текущие рассылки
+ - /list_users - показывает кол-во активных пользователей
 """
 ADMINS_HELP_MESSAGE = f"""
 {DEFAULT_HELP_MESSAGE}
 Админские возможности:
  - /customize_next_send - добавляет к следующей рассылки конкретного пользователя кастомные фотки
- - /wipe_custom_send_for_users {{user_id1}},... - удаляет все кастомные рассылки для пользователей
+ - /wipe_custom_send_for_users {{user_id1}},... - удаляет все кастомные рассылки для перечисленных пользователей
+ - /list_users - перечисляет всех активных пользователей
+ - /list_all_custom_sends - выводит все кастомные рассылки для пользователей
+ - /get_user_custom_send {{user_id}} {{custom_send_index}} - выведет конкретное кастомное сообщение для пользователя
 """
 
 
@@ -76,12 +81,18 @@ class Subscriber:
     def pretty_fprint(self) -> str:
         return f"{self.chat_id} | {self.username} | {self.last_name} {self.first_name}"
 
+    def pretty_fprintf_with_timers(self) -> str:
+        jobs = ""
+        for job in self.scheduler.jobs:
+            jobs += f" - {tg_utils.job_to_str(job)}\n"
+        return f"{self.chat_id} | {self.username}:\n" + jobs if jobs else "нет рассылок"
+
     def check_interval_limit(self, new_job: schedule.Job) -> str:
         for idx, job in enumerate(self.scheduler.jobs):
             diff_seconds = abs((new_job.at_time.hour - job.at_time.hour) * 3600 + (new_job.at_time.minute - job.at_time.minute) * 60 + (new_job.at_time.second - job.at_time.second))
             if diff_seconds < ALLOWED_MINIMUM_INTERVAL_BETWEEN_JOBS_SECONDS:
                 return "Извини, но я не могу отправлять тебе рассылки чаще чем один раз в 10 минут. 😣\n" \
-                       f"Если хочешь добавить эту рассылку, то удали {idx} по счету c интервалом {job.at_time.hour}:{'0' + str(job.at_time.minute) if job.at_time.minute <= 9 else job.at_time.minute}"
+                       f"Если хочешь добавить эту рассылку, то удали {idx + 1} по счету c интервалом {job.at_time.hour}:{'0' + str(job.at_time.minute) if job.at_time.minute <= 9 else job.at_time.minute}"
         return ""
 
     @staticmethod
@@ -135,6 +146,9 @@ class TelegramClient:
         dispatcher.add_handler(telegram.ext.CommandHandler('start', self.start))
         # admins handlers
         dispatcher.add_handler(telegram.ext.CommandHandler('subscribe_admin', self.register_admin))
+        dispatcher.add_handler(telegram.ext.CommandHandler('list_users', self.list_all_users))
+        dispatcher.add_handler(telegram.ext.CommandHandler('list_all_custom_sends', self.list_all_custom_sends))
+        dispatcher.add_handler(telegram.ext.CommandHandler('get_user_custom_send', self.get_user_custom_send))
         dispatcher.add_handler(telegram.ext.ConversationHandler(
             entry_points=[
                 telegram.ext.CommandHandler('customize_next_send', self.start_customize_next_send_admin),
@@ -279,7 +293,7 @@ class TelegramClient:
             text = "У тебе нет ни одной рассылки 😨\n" \
                    "/help чтобы узнать какой у меня есть функционал"
         else:
-            str_jobs = f"\n".join(f"[{idx}] " + self.job_to_str(job) for idx, job in enumerate(current_subscriber.scheduler.jobs))
+            str_jobs = f"\n".join(f"[{idx + 1}] " + tg_utils.job_to_str(job) for idx, job in enumerate(current_subscriber.scheduler.jobs))
             text = f"У тебя есть следующие рассылки:\n{str_jobs}"
         context.bot.send_message(chat_id=chat_id, text=text)
         utils.logger.info(f"[{chat_id}-list_all_jobs] 'list_all_jobs' handle succeeded")
@@ -311,9 +325,6 @@ class TelegramClient:
         utils.logger.info(f"[{chat_id}-customize_next_send] Triggered 'customize_next_send' handle...")
         utils.logger.debug(f"[{chat_id}-customize_next_send] Getting photos from message. Try to get a photos...")
         photos = update.effective_message.photo
-        photo = None
-        if photos:
-            photo = photos[0]
         photo = photos[-1] if photos and isinstance(photos, list) else photos
         utils.logger.debug(f"[{chat_id}-customize_next_send] Got attachments {photos}")
         utils.logger.debug(f"[{chat_id}-customize_next_send] Now try to get a custom message...")
@@ -324,7 +335,6 @@ class TelegramClient:
         elif update.effective_message.caption:
             utils.logger.debug(f"[{chat_id}-customize_next_send] Got custom compliment from caption {update.effective_message.caption}")
             compliment = update.effective_message.caption
-
 
         def_message = f"Перепроверь, что все правильно и если все ок, то отправь через запятую ID чатов кому добавить это в следующую рассылку.\nПользователи, которым можно добавить в рассылку: {', '.join(map(str, self.get_all_subscribers_chat_ids()))}\n Если ты передумал, то введи /skip"
         if photo:
@@ -373,18 +383,22 @@ class TelegramClient:
             return self.CHAT_ID_EVENT
         utils.logger.debug(f"[{chat_id}-get_chat_ids_to_send_custom_attches] attachments will be send to {real_chats}")
         for chat in real_chats:
-            self.CUSTOM_SEND_BY_USER[chat] = self.TMP_ATTACHMENTS
+            if self.CUSTOM_SEND_BY_USER.get(chat):
+                self.CUSTOM_SEND_BY_USER[chat].append(self.TMP_ATTACHMENTS)
+            else:
+                self.CUSTOM_SEND_BY_USER[chat] = [self.TMP_ATTACHMENTS]
 
         context.bot.send_message(chat_id=chat_id, text=f"Отлично, кастомная рассылка добавлена пользователям: "
                                                        f"{', '.join(map(str, real_chats))}")
         return ext.ConversationHandler.END
 
-    def skip_adding_photos(self, update: telegram.Update, context: telegram.ext.CallbackContext):
+    def skip_adding_photos(self, update: telegram.Update, _):
         chat_id = update.effective_chat.id
         utils.logger.info(f"[{chat_id}-skip_adding_photos] Triggered 'skip_adding_photos' handle...")
         return ext.ConversationHandler.END
 
     def wipe_custom_send_for_users(self, update: telegram.Update, context: telegram.ext.CallbackContext):
+        """ Очищает все кастомные рассылки для пользователей, которые указаны в аргументах """
         chat_id = update.effective_chat.id
         utils.logger.info(f"[{chat_id}-wipe_custom_send_for_users] Triggered 'wipe_custom_send_for_users' handle...")
         users = None
@@ -406,6 +420,90 @@ class TelegramClient:
                 utils.logger.debug(f"[{chat_id}-wipe_custom_send_for_users] not found custom send for user")
         context.bot.send_message(chat_id=chat_id, text=f"Еще остались кастомные рассылки для следующих пользователей: "
                                                        f"{', '.join(map(str, self.CUSTOM_SEND_BY_USER.keys()))}")
+
+    def list_all_users(self, update: telegram.Update, context: telegram.ext.CallbackContext):
+        """ Для обычных пользователей выводит кол-во активных подписчиков,
+        а для админов выводит список всех пользователей и их таймеры """
+        chat_id = update.effective_chat.id
+        utils.logger.info(f"[{chat_id}-list_all_users] Triggered 'list_all_users' handle...")
+        if chat_id not in self.admins:
+            utils.logger.debug(f"[{chat_id}-list_all_users] {chat_id} is not admin show only count of active users...")
+            context.bot.send_message(chat_id=chat_id, text=f"На данный момент на котеек подписано {len(self.subscribers)} котеек 🥳")
+            return
+        utils.logger.debug(f"[{chat_id}-list_all_users] {chat_id} is admin show full info about active users...")
+        all_subscribers = ""
+        for idx, subscriber in enumerate(self.subscribers):
+            all_subscribers += f'[{idx + 1}] {subscriber.pretty_fprintf_with_timers()}\n'
+        context.bot.send_message(chat_id=chat_id, text=f"Список всех пользователей:\n{all_subscribers}")
+
+    def list_all_custom_sends(self, update: telegram.Update, context: telegram.ext.CallbackContext):
+        """ Выводит список всех кастомных рассылок без фотографий, для полной информации для конкретной
+        рассылки у пользователя, используй get_user_custom_send метод """
+        chat_id = update.effective_chat.id
+        utils.logger.info(f"[{chat_id}-list_all_custom_sends] Triggered 'list_all_custom_sends' handle...")
+        if chat_id not in self.admins:
+            utils.logger.debug(f"[{chat_id}-list_all_custom_sends] {chat_id} is not admin skip...")
+            return
+        utils.logger.debug(f"[{chat_id}-list_all_custom_sends] {chat_id} is admin show all custom sends...")
+        data = ""
+        idx = 1
+        for user_chat_id, sends in self.CUSTOM_SEND_BY_USER.items():
+            subscriber = self.get_subscriber_by_id(chat_id=user_chat_id)
+            str_sends = ""
+            for jdx, send in enumerate(sends):
+                compliment = send.get('compliment')
+                photos = send.get('photos')
+                str_send = f"\t[{jdx + 1}]"
+                if compliment:
+                    str_send += f"комплимент: '{compliment}' "
+                if photos:
+                    str_send += f"фотки: {len(photos)}"
+                str_sends += str_send + "\n"
+            data += f"[{idx}] {subscriber.chat_id} | {subscriber.username}:\n" + str_sends
+            idx += 1
+        msg = f"Текущие кастомные рассылки:\n{data}" if data else "На данный момент кастомных рассылок нет"
+        context.bot.send_message(chat_id=chat_id, text=msg)
+
+    def get_user_custom_send(self, update: telegram.Update, context: telegram.ext.CallbackContext):
+        """ Выводит полную рассылку у конкретного пользователя """
+        chat_id = update.effective_chat.id
+        utils.logger.info(f"[{chat_id}-get_user_custom_send] Triggered 'get_user_custom_send' handle...")
+        args = self.get_params(update.effective_message.text)
+        utils.logger.debug(f"[{chat_id}-get_user_custom_send] got this command args {args}...")
+        def_hint_message = "Для того, чтобы посмотреть какие есть кастомные рассылки введи команду /list_all_custom_sends"
+        if len(args) != 2:
+            utils.logger.debug(f"[{chat_id}-get_user_custom_send] wrong number of command args...")
+            context.bot.send_message(chat_id=chat_id, text="Неверное кол-во аргументов. "
+                                                           "Укажи через пробел ID пользователя, а затем номер рассылки.\n"
+                                                           "Пример: /get_user_custom_send 123 1\n"
+                                                           + def_hint_message)
+            return
+        try:
+            user_chat_id, number_of_custom_send = map(int, args)
+        except Exception:
+            utils.logger.debug(f"[{chat_id}-get_user_custom_send] values is non-integers")
+            context.bot.send_message(chat_id=chat_id, text="ID пользователя и порядковый номер рассылки должны быть "
+                                                           "числовыми значениями\nПример: /get_user_custom_send 123 1\n"
+                                                           + def_hint_message)
+            return
+        users_custom_sends = self.CUSTOM_SEND_BY_USER.get(user_chat_id)
+        utils.logger.debug(f"[{chat_id}-get_user_custom_send] sends for user {chat_id}: {users_custom_sends}")
+        if not users_custom_sends:
+            utils.logger.debug(f"[{chat_id}-get_user_custom_send] no custom sends for user {user_chat_id}")
+            context.bot.send_message(chat_id=chat_id, text=f"Для пользователя с ID '{user_chat_id}' рассылки не найдены. " + def_hint_message)
+            return
+        try:
+            custom_send = users_custom_sends[number_of_custom_send - 1]
+            utils.logger.debug(f"[{chat_id}-get_user_custom_send] got custom send by number {number_of_custom_send} for user {user_chat_id}: {custom_send}")
+        except Exception:
+            utils.logger.debug(f"[{chat_id}-get_user_custom_send] no custom send by number {number_of_custom_send} for user {user_chat_id}")
+            context.bot.send_message(chat_id=chat_id, text=f"Для пользователя c ID '{user_chat_id}' не найдено рассылки под номером {number_of_custom_send}. " + def_hint_message)
+            return
+        if custom_send.get('photos'):
+            context.bot.send_photo(chat_id=chat_id, photo=custom_send.get('photos')[0], caption="Будет отправлена эта фотка")
+        if custom_send.get('compliment'):
+            context.bot.send_message(chat_id=chat_id, text=f"Будет отправлен комплимент: {custom_send.get('compliment')}")
+
 
     # utilities functions
 
@@ -533,11 +631,6 @@ class TelegramClient:
     def get_params(self, text: str) -> list[str]:
         return text.strip().split()[1:]
 
-    def job_to_str(self, job: schedule.Job):
-        if job.interval == 1:
-            return f"Каждый день в {job.at_time}"
-        return f"Каждые {job.interval} дней в {job.at_time}"
-
     def get_subscriber_by_id(self, chat_id: int):
         current_subscriber = None
         for subscriber in self.subscribers:
@@ -565,13 +658,15 @@ class TelegramClient:
         return def_scheduler
 
     def prepare_cats_to_send(self, cats_file_paths: list[str], chat_id: int) -> list[InputMediaPhoto]:
-        custom_attachments = self.CUSTOM_SEND_BY_USER.get(chat_id)
+        try:
+            custom_attachment = self.CUSTOM_SEND_BY_USER[chat_id].pop(0)
+        except Exception:
+            custom_attachment = None
         custom_compliment = ''
         custom_photos = []
-        if custom_attachments:
-            custom_compliment = custom_attachments.get('compliment', '')
-            custom_photos = custom_attachments.get('photos', [])
-            self.CUSTOM_SEND_BY_USER.pop(chat_id)
+        if custom_attachment:
+            custom_compliment = custom_attachment.get('compliment', '')
+            custom_photos = custom_attachment.get('photos', [])
 
         compliment = custom_compliment if custom_compliment else self.get_compliment()
         photos = list(custom_photos + cats_file_paths)[:10]
