@@ -2,15 +2,13 @@ import os
 
 import loguru
 
-from variables import PROGRAM_FILES_DIRECTORY, TODAY_PICTURES_DIRECTORY
+from variables import LOGS_FILE, TODAY_PICTURES_DIRECTORY
 
 
 class Logger:
-    LOGS_FILE = f"/app/workspace/logs/morning_cats.logs"
-
     def __init__(self) -> None:
         self.__logger = loguru.logger
-        self.__logger.add(sink=self.LOGS_FILE)
+        self.__logger.add(sink=LOGS_FILE)
 
     def info(self, message: str):
         self.__logger.info(message)

@@ -13,12 +13,12 @@ class CatsClient:
         pass
 
     @staticmethod
-    def do_cats_get(method: str) -> any:
+    def do_cats_get(method: str, limit: int = 10) -> any:
         headers = {
             "x-api-key": CAT_API_TOKEN,
         }
         body = {
-            "limit": 10,
+            "limit": limit,
             "page": 0,
             "order": "rand",
         }
@@ -56,9 +56,9 @@ class CatsClient:
         del resp
         return filename
 
-    def get_cats_urls(self):
+    def get_cats_urls(self, limit: int = 10):
         utils.logger.info("Start getting cats pictures urls")
-        cats = self.do_cats_get(SEARCH_HANDLE)
+        cats = self.do_cats_get(SEARCH_HANDLE, limit=limit)
         if not cats:
             utils.logger.error("Empty cats response")
             return []
