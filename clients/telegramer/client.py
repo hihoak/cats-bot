@@ -681,6 +681,14 @@ class TelegramClient:
 
         return cats_to_send
 
+    def delete_cats_files(self, cats_file_paths: list[str]):
+        for file in cats_file_paths:
+            try:
+                os.remove(file)
+                utils.logger.debug(f"Successfully remove file {file}...")
+            except Exception as ex:
+                utils.logger.warning(f"Can't remove file {file}. Error: {ex}")
+
     def get_compliment(self):
         utils.logger.info("Start getting compliment of a day")
         compliment_of_a_day = DEFAULT_COMPLIMENT
@@ -709,4 +717,6 @@ class TelegramClient:
         except Exception as ex:
             utils.logger.error(f"Can't send kotiks to subscriber {chat_id}. Error: {ex}")
             return
+
+        self.delete_cats_files(cats_file_paths=cats_file_paths)
         utils.logger.info(f"Successfully send cats to chat '{chat_id}'")
